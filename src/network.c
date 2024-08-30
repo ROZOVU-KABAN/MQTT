@@ -208,3 +208,37 @@ err:
   fprintf(stderr, "recv(2) - error reading data: %s", strerror(errno));
   return -1;
 }
+
+
+
+#define EVLOOP_INITIAL_SIZE 4
+
+struct evloop *evloop_create(int max_events, int timeout)
+{
+   struct evloop *loop = malloc(sizeof(*loop));
+   evloop_init(loop, max_events, timeout);
+   return loop;
+}
+
+void evloop_init(struct evloop *loop, int max_events, int timeout)
+{
+   loop->max_events = max_events;
+   loop->events = malloc(sizeof(struct epoll_event*) * max_events);
+   loop->epollfd = epoll_create1(0);
+   loop->timeout = timeout;
+   loop->periodic_maxsize = EVLOOP_INITIAL_SIZE;
+   loop->periodic_nr = 0;
+   loop->periodic_tasks = 
+	   malloc(EVLOOP_INITIAL_SIZE * sizeof(*loop->periodic_tasks));
+   loop->status = 0;
+}
+
+
+void evloop_free(struct evloop *loop)
+{
+   free(loop->events);
+   for(int i = 0; i < loop->periodic_nr; ++i)
+	   free(loop->periodic_tasks[i]);
+   free(loop->periodic_tasks);
+   free(loop);
+}

@@ -3,7 +3,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include <sys\types.h>
+#include <sys/types.h>
 #include "util.h"
 
 
@@ -23,5 +23,57 @@ int accept_connection(int);
 ssize_t send_bytes(int, const unsigned char *, size_t);
 
 ssize_t recv_bytes(int, unsigned char *, size_t);
+
+
+struct evloop
+{
+   int epollfd;
+   int max_events;
+   int timeout;
+   int status;
+   struct epoll_event *events;
+
+   int periodic_maxsize;
+   int periodic_nr;
+   struct 
+   {
+      int timerfd;
+      struct closure *closure;
+   } **periodic_tasks; 
+}evloop;
+
+
+typedef void callback(struct evloop *, void *);
+
+struct closure
+{
+	int fd;
+	void *obj;
+	void *args;
+	char closure_id[UUIN_LEN];
+	struct bytestring *payload;
+	callback *call;
+};
+
+struct evloop *evloop_create(int, int);
+void evloop_init(struct evloop *, int, int);
+void evloop_free(struct evloop *);
+
+int evloop_wait(struct evloop *);
+void evloop_add_callback(struct evloop *, struct clousure *);
+
+
+void evloop_add_periodic_task(struct evloop *,
+			       int,
+			       unsigned long long,
+			       struct clousure *);
+
+int evloop_del_callback(struct evloop *, struct clousure *);
+
+int evloop_rearm_callback_read(struct evloop *, struct clousure *);
+
+int epoll_add(int, int, int, void *);
+int epoll_mod(int, int, int, void *);
+int epoll_del(int, int);
 
 #endif
