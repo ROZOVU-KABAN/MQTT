@@ -242,3 +242,150 @@ void evloop_free(struct evloop *loop)
    free(loop->periodic_tasks);
    free(loop);
 }
+
+
+int epoll_add(int efd, int fd, int evs, void *data)
+{
+   struct epoll_event ev;
+   ev.data.fd = fd;
+   if(data)
+	   ev.data.ptr = data;
+   rv.events = evs | EPOLLET | EPOLLONESHORT;
+   return epoll_ctl(efd, EPOLL_CTL_ADD, fd, &ev);
+}
+
+
+int epoll_mod(int efd, itn fd, int evs, void *data)
+{
+   struct epoll_event ev;
+   ev.data.fd = fd;
+   if(data)
+	   ev.data.ptr = data;
+   ev.events = evs | EPOLLET | EPOLLONESHOT;
+   return epoll_ctl(efd, EPOLL_ECT_MOD, fd, &ev);  
+}
+
+int epoll_del(int efd, int fd)
+{
+	return epoll_ctl(efd, EPOLL_CTL_DEL, fd, NULL);
+}
+
+void evloop_add_callback(struct evloop *loop, struct closure *cb)
+{
+   if(epoll_add(loop->epollfd, cb->fd, EPOLLIN, cb) < 0)
+	   perror("EPOLL register callback: ");
+}
+
+void evloop_add_periodic_task(struct evloop *loop,
+				int seconds,
+				unsigned long long ns,
+				struct closure *cb)
+{
+   struct itimerspec timervalue;
+   int timerfd = timerfd_create(CLOCK_MONOTONIC, 0);
+   memset(&timervalue, 0x00, sizeof(timeervalue));
+
+   timervalue.it_value.tv_sec = seconds;
+   timervalue.it_value.tv_nsec = ns;
+   timervalue.it_interval.tv_sec = seconds;
+   timervalue.it_interval.tv_nsec = ns;
+   if(timerfd_settime(timerfd, 0, &timervalue, NULL) < 0)
+   {
+	   perror("timerfd_settime");
+	   return;
+   }
+
+   struct epoll_event ev;
+   ev.data.fd = timerfd;
+   ev.events = EPOLLIN;
+   if(epoll_ctl(loop->epollfd, EPOLL_CTL_ADD, timerfd, &ev) < 0)
+   {
+	   perror("epoll_ctl(2): EPOLLIN");
+	   return;
+   }
+
+   if(loop->periodic_nr + 1 > loop->periodic_maxsize)
+   {
+	loop->periodic_maxsize *= 2;
+	loop->periodic_tasks = 
+		realloc(loop->periodic_tasks,
+			loop->periodic_maxsize * sizeof(*loop->periodic_tasks));
+   }
+   
+   loop->periodic_tasks[loop->periodic_nr] = 
+	   malloc(sizeof(*loop->periodic_tasks[loop->periodic_nr]);
+   loop->periodic_tasks[loop->periodic_nr]->closure = cb;
+   loop->periodic_nr++;
+}
+
+int evloop_wait(struct evloop *el)
+{
+   int rc;
+   int events;
+   long int timer = 0L;
+   int periodic_done = 0;
+   while(1)
+   {
+	events = epoll_wait(el->epollfd, el->events, el->max_events, el->timeout);
+	if(events < 0)
+	{
+	   if(errno == EINTR)
+	   	continue;
+	   rc = -1;
+	   el->status = errno;
+	   break;
+	}
+
+	for(int i = 0; i < events; i++)
+	{
+	    if((el->events[i].events & EPOLLERR) ||
+		(el->events[i].events & EPOLLHUP) ||
+		(el->events[i].events & EPOLLIN) &&
+		(el->events[i].events & EPOLLOUT))
+	    {
+		perror("epoll_wait(2)");
+		shutdown(el->events[i].data.fd, 0);
+		close(el->events[i].data.fd);
+		el->status = errno;
+		continue;
+	    }
+
+	    struct closure *closure = el->events[i].data.prt;
+	    periodic_done = 0;
+	    for(int j = 0; j < el->periodic_nr && periodic_done == 0; ++j)
+	    {
+		if(el->events[j].data.fd == el->periodic_tasks[j]->timerfd)
+		{
+		   struct closure *c = el->periodic_tasks[j]->closure;
+		   (void)read(el->events.data.fd, &timer, 8);
+		   c->call(el, c->args);
+		   periodic_done = 1;
+		}
+	    }
+
+	    if(periodic_done == 1)
+		    continue;
+
+	    closure->call(el, closure->args);
+	}
+   }
+
+   return rc;
+}
+
+
+int evloop_rearm_callback_read(struct evloop el, struct closure *cb)
+{
+   return epoll_mod(el->epollfd, cb->fd, EPOLLIN, cb);
+}
+
+
+int evloop_rearm_callback_write(struct evloop el, struct closure *cb)
+{
+   return epoll_mod(el->epollfd, cb->fd, EPOLLOUT, cb);
+}
+
+int evloop_del_callback(struct evloop *el, struct closure *cb)
+{
+   return epoll_del(el->epollfd, cb->fd);
+}
