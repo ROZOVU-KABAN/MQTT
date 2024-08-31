@@ -121,3 +121,111 @@ static void on_accept(struct evloop *loop, void *arg)
    sol_info("New connection from %s on port %s", conn.ip, conf->port);
 }
 
+
+static ssize_t recv_packet(int clientfd, unsigned char *buf, char *command)
+{
+   ssize_t nbytes = 0;
+   if((nbytes = recv_bytes(clientfd, buf, 1)) <= 0)
+	   return -ERRCLIENTDC;
+   unsigned char byte = *buf;
+   buf++;
+   if(DISCONNECT < byte || CONNECT > byte)
+   	return -ERRPACKETERR;
+   
+   unsigned char buff[4];
+   int count = 0;
+   int n = 0;
+   do
+   {
+ 	if((n = recv_bytes(clientfd, buf+count, 1)) <= 0)
+		return -ERRCLIENTDC;
+	buff[count] = buf[count];
+	nbytes += n;
+   }while(buff[count++] & (1 << 7));
+
+
+   const unsigned char *pbuf = &buff[0];
+   unsigned long long tlen = mqtt_decode_length(&pbuf);
+
+   if(tlen > conf->max_request_size)
+   {
+	   nbytes = -ERRMAXREQSIZE;
+	   goto exit;
+   }
+
+   if((n = recv_bytes(clientfd, buf + 1, tlen)) < 0)
+	   goto err;
+   nbytes += n;
+   *command = byte;
+exit:
+   return nbytes;
+err:
+   shutdown(clienfd, 0);
+   close(clientfd);
+   return nbytes;
+}
+
+
+static void on_read(struct evloop *loop, void *arg)
+{
+  struct closure *cb = arg;
+
+  unsigned char *buffer = malloc(conf->max_request_size);
+  ssize_t bytes = 0;
+  char command = 0;
+
+  bytes = recv_packet(cb->fd, buffer, &command);
+  if(bytes == -ERRCLIENTDC || bytes == -ERRMAXREQSIZE)
+	  goto exit;
+
+  if(bytes == -ERRPACKETERR)
+	  goto errdc;
+  info.bytes_recv++;
+
+  union mqtt_packet packet;
+  unpack_mqtt_packet(buffer, &packet);
+  union mqtt_header header hdr = {.byte = command};
+  int rc = handlers[hdr.bits.type](cb, &packet);
+  if(rc == REARM_W)
+  {
+     cb->call = on_write;
+     evloop_rearm_callbazck_write(loop, cb);
+  } else if(rc == REARM_R)
+  {
+     cb->call = on_read;
+     evloop_rearm_callback_read(loop, cb);
+  }
+
+exit:
+  free(buffer);
+  return;
+errdc:
+  free(buffer);
+  sol_error("Dropping client");
+  shutdown(cb->fd, 0);
+  close(cb->fd);
+
+  hashtable_del(sol.clients, ((struct sol_client*) cb->obj)->client_id);
+  hashtable_del(sol.closures, cb->closure_id);
+  info.nclients--;
+  info.nconnections--;
+  return;
+}
+
+static void on_write(struct evloop *loop, void *arg)
+{
+  struct closure *cb = arg;
+  ssize_t sent;
+  if((sent = send_bytes(cb->fd, cb->payload->data, cb->payload->size)) < 0)
+	  sol_error("Error writing on socket to client %s: %s",
+			  ((struct sol_client*)cb->obj)->client_id, strerror(errno));
+
+  info.bytes_sent += sent;
+  bytestring_release(cb->payload);
+  cb->payload = NULL;
+
+  cb->call = on_read;
+  evloop_rearm_callback_read(loop, cb);
+}
+
+
