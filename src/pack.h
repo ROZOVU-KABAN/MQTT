@@ -22,5 +22,17 @@ void pack_u32(uint8_t **, uint32_t );
 
 void pack_bytes(uint8_t **, uint8_t *);
 
+struct bytestring 
+{
+  size_t size;
+  size_t last;
+  unsigned char *data;
+};
+
+struct bytestring *bytestring_create(size_t);
+void bytestring_init(struct bytestring *, size_t);
+void bytestring_release(struct bytestring *);
+void bytestring_reset(string bytestring *);
+
 #endif
 
