@@ -189,7 +189,7 @@ ssize_t recv_bytes(int fd, unsigned char *buf, size_t bufsize)
 {
   ssize_t n = 0;
   ssize_t total = 0;
-  while (total < (ssize_t)busize)
+  while (total < (ssize_t)bufsize)
   {
      if((n = recv(fd, buf, bufsize-total, 0)) < 0)
      {

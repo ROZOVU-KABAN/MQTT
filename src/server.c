@@ -229,3 +229,202 @@ static void on_write(struct evloop *loop, void *arg)
 }
 
 
+
+#define SYS_TOPICS 14
+
+static const char *sys_topics[SYS_TOPICS] = 
+{
+   "$SOL/",
+   "$SOL/broker/",
+   "$SOL/broker/clients/",
+   "$SOL/broker/bytes/",
+   "$SOL/broker/messages/",
+   "$SOL/broker/uptime/",
+   "$SOL/broker/uptime/sol/",
+   "$SOL/broker/clients/connected/",
+   "$SOL/broker/clients/disconnected/",
+   "$SOL/broker/bytes/sent/",
+   "$SOL/broker/bytes/received/",
+   "$SOL/broker/messages/sent/",
+   "$SOL/broker/messages/received/",
+   "$SOL/broker/memory/used/"
+};
+
+static void run(struct evloop *loop)
+{
+  if(evloop_wait(loop) < 0)
+  {
+	sol_error("Event loop exited unexpectedly: %s", strerror(loop->status));
+	evloop_free(loop);
+  }
+}
+
+
+static int client_destructor(struct hashtable_entry *entry)
+{
+   if(!entry)
+	   return -1;
+
+   struct sol_client *client = entry->val;
+   if(client->client_id)
+	   free(client->client_id);
+   free(client);
+   return 0;
+}
+
+static int closure_destructor(struct hashtable_entry *entry)
+{
+   if(!entry)
+	   return -1;
+
+   struct closure *closure = entry->val;
+   if(closure->payload)
+	   bytestring_release(closure->payload);
+   free(closure);
+   return 0;
+}
+
+int start_server(const char *addr, const char port)
+{
+   trie_init(&sol.topics);
+   sol.clients = hashtable_create(client_destructor);
+   sol.closure = hashtable_create(closure_destructor);
+
+   struct closure server_closure;
+
+   server_closure.fd = make_listen(addr, port, conf->socket_famili);
+   server_closure.payload = NULL;
+   server_closure.args = &server_closure;
+   server_closure.call = on_accept;
+   generate_uuid(server_closure.closure_id);
+
+   for(int i = 0; i < SYS_TOPICS; i++)
+	   sol_topic_put(&sol, topic_create(strdup(sys_topics[i])));
+
+   struct evloop *event_loop = evloop_create(EPOLL_MAX_EVENTS, EPOLL_TIMEOUT);
+
+   evloop_add_callback(event_loop, &server_closure);
+
+
+   struct closure sys_closure = 
+   {
+	.fd = 0,
+	.payload = NULL,
+	.args = &sys_closure,
+	.call = publish_stats;
+   };
+
+   generaet_uuid(sys_closure.closure_id);
+   
+   evloop_add_periodic_task(event_loop, conf->stats_pub_interval,
+		   0, &sys_closure);
+
+   sol_info("Server start");
+   info.start_time = time(NULL);
+   run(event_loop);
+   hashtable_release(sol.clients);
+   hashtable_release(sol.closures);
+   sol_info("Sol v%s exiting", VERSION);
+   return 0;
+}
+
+static void publish_message(unsigned short pkt_id,
+			    unsigned short topiclen,
+			    const char *topic,
+			    unsigned short payloadlen,
+			    unsigned char *payload)
+{
+   struct topic *t = sol_topic_get(&sol, topic);
+   if(!t)
+	   return;
+
+   union mqtt_packet pkt;
+   struct mqtt_publish *p = mqtt_packet_publish(PUBLISH_BYTE,
+		   				pkt_id,
+						topiclen,
+						(unsigned char *)topic,
+						payloadlen,
+						payload);
+
+   pkt.publish = *p;
+   size_t len;
+   unsigned char *packed;
+
+   struct list_node *cur = t->subscribees->head;
+   size_t sent = 0L;
+   for(; curr; curr = curr->next)
+   {
+       sol_debug("Send PUBLISH (d%i, q%u, r%i, m%u, %s, ... (%i bytes))",
+		       pkt.publish.header.bits.dup,
+		       pkt.publish.header.bits.qos,
+		       pkt.publish.header.bits.retain,
+		       pkt.publish.pkt_id,
+		       pkt.publish.topic,
+		       pkt.publish.payloadlen);
+
+       len = MQTT_HEADER_LEN + sizeof(uint16_t) + 
+	       pkt.publish.topiclen + pkt.publish.payloadlen;
+
+       struct subscriber *sub = cur->data;
+       struct sol_client *sc = sub->client;
+
+       pkt.publish.header.bits.qos = sub->qos;
+       if(pkt.publish.header.bits.qos > AT_MOST_ONCE)
+	       len += sizeof(uint16_t);
+       int remaininglen_offset = 0;
+       if((len - 1) > 0x200000)
+	       remaininglen_offset = 3;
+       else if((len - 1) > 0x4000)
+	       remaininglen_offset = 2;
+       else if((len - 1) > 0x80) 
+	       remaininglen_offset = 1;
+       len += remaininglen_offset;
+       packed = pack_mqtt_packet(&pkt, PUBLISH);
+
+       if((send = send_bytes(sc->fd, packed, len)) < 0)
+	       sol_error("Error publish to %s: %s",
+			       sc->client_id, strerror(errno));
+
+       info.bytes_sent += sent;
+       info.messages_sent++;
+       free(packed);
+   }
+   free(p);
+}
+
+
+static void publish_stats(struct evloop *loop, void *args)
+{
+  char cclients[number_len(info.nclients) + 1];
+  sprintf(cclients, "%d", info.nclients);
+
+  char bsent[number_len(info.bytes_sent) + 1];
+  sprintf(bsent, "%lld", info.bytes_sent);
+
+  char msent[number_len(info.messages_sent) + 1];                                                      mprintf(bsent, "%lld", info.messages_sent); 
+
+  char mrevc[number_len(info.messages_recv) + 1];                                                      sprintf(mrecv, "%lld", info.bytes_recv); 
+  
+  long long uptime = time(NULL) - info.start_time;
+  char utime[number_len(uptime) + 1];
+  sprintf(utime, "%lld", uptime);
+
+  double sol_uptime = (double)(time(NULL) - info.start_time) / SOL_SECONDS;
+  char sutime[16];
+  sprintf(sutime, "%.4f", sol_uptime);
+  publish_message(0, strlen(sys_topics[5]), sys_topics[5],
+		  strlen(utime), (unsigned char*)&utime);
+
+  publish_message(0, strlen(sys_topics[6]), sys_topics[6],                                                             strlen(sutime), (unsigned char*)&sutime);
+
+  publish_message(0, strlen(sys_topics[7]), sys_topics[7],                                                             strlen(cclients), (unsigned char*)&cclients);
+
+  publish_message(0, strlen(sys_topics[9]), sys_topics[9],                                                             strlen(bsent), (unsigned char*)&bsent);
+
+  publish_message(0, strlen(sys_topics[11]), sys_topics[11],                                                             strlen(msent), (unsigned char*)&msent);
+
+  publish_message(0, strlen(sys_topics[12]), sys_topics[12],                                                              strlen(mrecv), (unsigned char*)&mrecv);
+}
+
+
+
